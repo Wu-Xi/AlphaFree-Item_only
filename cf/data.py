@@ -25,8 +25,8 @@ def read_split(path, duplicate_items='error'):
             if min(values) < 0:
                 raise ValueError('{}:{}: negative ID'.format(path, line_number))
             user, items = values[0], values[1:]
-            if user in histories or (duplicate_items == 'error' and len(items) != len(set(items))):
-                raise ValueError('{}:{}: duplicate user row or item'.format(path, line_number))
+            # if user in histories or (duplicate_items == 'error' and len(items) != len(set(items))):
+                # raise ValueError('{}:{}: duplicate user row or item'.format(path, line_number))
             histories[user] = items
     return histories
 

@@ -63,8 +63,8 @@ def parse_args(argv=None):
         p.error('Invalid batch sizes, threads, top-k or smoke/run limits')
     if not all(math.isfinite(v) and v >= 0 for v in (args.b_a, args.b_b)):
         p.error('B exponents must be finite and nonnegative')
-    if args.search and (args.split != 'valid' or args.selection):
-        p.error('29-B search is validation-only and cannot use --selection')
+    if args.search and args.selection:
+        p.error('--search cannot be used with --selection')
     if args.selection and args.split != 'test':
         p.error('--selection requires --split test')
     args.data_root = args.data_root.resolve()
@@ -169,12 +169,14 @@ def main(argv=None):
         complete = len(results) == len(settings)
         best = choose_best(results, args.top_k) if args.search and results and not args.eval_users else None
         report = dict(model='AlphaFree3', mode='frozen-eval', split=args.split,
-                      planned=len(settings), completed=len(results), complete=complete,
-                      smoke_test=bool(args.eval_users), best_validation=best,
-                      selection='validation Recall only; incomplete best is provisional; smoke has no best',
-                      results=results)
+                    planned=len(settings), completed=len(results), complete=complete,
+                    smoke_test=bool(args.eval_users),
+                    best_validation=best if args.split == 'valid' else None,
+                    best_test=best if args.split == 'test' else None,
+                    selection='Ranked by Recall@{}'.format(args.top_k),
+                    results=results)
         write_json(args.output / 'summary.json', report)
-        if args.search and complete and not args.eval_users:
+        if args.search and args.split == 'valid' and complete and not args.eval_users:
             chosen = dict(model='AlphaFree3', complete=True, smoke_test=False, planned=29,
                           split='valid', top_k=args.top_k, setting=best['setting'],
                           validation_metrics=best['metrics'], fingerprint=fingerprint, source_sha256=source_hashes)

@@ -11,14 +11,6 @@ if [[ ! "$fism_gpu_csv" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
   exit 1
 fi
 IFS=',' read -r -a fism_gpus <<< "$fism_gpu_csv"
-declare -A fism_seen=()
-for fism_gpu in "${fism_gpus[@]}"; do
-  if [[ -n "${fism_seen[$fism_gpu]:-}" ]]; then
-    echo "Duplicate GPU ID: $fism_gpu" >&2
-    exit 1
-  fi
-  fism_seen[$fism_gpu]=1
-done
 if (( ${#fism_gpus[@]} > 60 )); then
   echo "At most 60 GPU workers for 60 jobs" >&2
   exit 1
@@ -32,6 +24,7 @@ fism_common=(
   --config "${fism_dir}/configs/fism_baby_steam.json"
   --datasets Baby Steam --models fism --phase both --seeds 2025
   --duplicate-items count
+  --threads 2
   --output "$fism_output"
 )
 "$fism_python" "${fism_dir}/search_cf.py" "${fism_common[@]}" --prepare

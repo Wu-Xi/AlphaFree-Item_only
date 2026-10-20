@@ -199,6 +199,7 @@ def execute_job(root, job, args, data, graph, device, retry_failed=False):
         attempt = 'attempt_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         attempt_dir = directory / attempt
         attempt_dir.mkdir(exist_ok=False)
+        run_dir = attempt_dir / 'run'
         status = dict(state='running', attempt=attempt, job_digest=digest(job),
                       host=socket.gethostname(), pid=os.getpid(), device=str(device))
         atomic_json(status_path, status)
@@ -209,7 +210,7 @@ def execute_job(root, job, args, data, graph, device, retry_failed=False):
                     b = (data.aggregation(args.b_mode, args.b_a, args.b_b)
                          if job['variant'] == 'item-only' and job['model'] != 'fism' else None)
                     run_one(data, args, job['model'], job['variant'], device, graph, b,
-                            run_dir=attempt_dir / 'run')
+                            run_dir=run_dir)
             status['state'] = 'completed'
             atomic_json(status_path, status)
             return 'completed'
