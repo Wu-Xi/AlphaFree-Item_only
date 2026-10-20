@@ -13,7 +13,9 @@ DATASETS = dict(movie='amazon_movie', book='amazon_book_2014',
                 beauty='amazon_beauty_personal', health='amazon_health')
 
 
-def read_split(path):
+def read_split(path, duplicate_items='error'):
+    if duplicate_items not in ('error', 'count'):
+        raise ValueError('duplicate_items must be error or count')
     histories = {}
     with Path(path).open(encoding='utf-8-sig') as stream:
         for line_number, line in enumerate(stream, 1):
@@ -23,7 +25,7 @@ def read_split(path):
             if min(values) < 0:
                 raise ValueError('{}:{}: negative ID'.format(path, line_number))
             user, items = values[0], values[1:]
-            if user in histories or len(items) != len(set(items)):
+            if user in histories or (duplicate_items == 'error' and len(items) != len(set(items))):
                 raise ValueError('{}:{}: duplicate user row or item'.format(path, line_number))
             histories[user] = items
     return histories
@@ -38,9 +40,9 @@ def file_hash(path):
 
 
 class CFData:
-    def __init__(self, directory):
+    def __init__(self, directory, duplicate_items='error'):
         self.directory = Path(directory).resolve()
-        self.splits = {name: read_split(self.directory / (name + '.txt'))
+        self.splits = {name: read_split(self.directory / (name + '.txt'), duplicate_items)
                        for name in ('train', 'valid', 'test')}
         all_users = set().union(*(set(split) for split in self.splits.values()))
         all_items = {item for split in self.splits.values()
@@ -61,6 +63,9 @@ class CFData:
             (np.ones(len(self.pairs), dtype=np.float32),
              (self.pairs[:, 0], self.pairs[:, 1])), shape=(self.n_users, self.n_items))
         self.stats = dict(n_users=self.n_users, n_items=self.n_items,
+                          duplicate_items=duplicate_items,
+                          repeated_occurrences={s: sum(len(items) - len(set(items)) for items in h.values())
+                                                for s, h in self.splits.items()},
                           observed_user_ids=len(all_users), observed_item_ids=len(all_items),
                           interactions={s: sum(map(len, h.values())) for s, h in self.splits.items()},
                           sha256={s: file_hash(self.directory / (s + '.txt')) for s in self.splits})

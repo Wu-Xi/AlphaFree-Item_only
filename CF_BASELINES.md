@@ -1,6 +1,6 @@
 # 在 AlphaFree 数据集上运行 LightGCN-RNS / StabCF / SimGCL / DirectAU / FISM
 
-新增入口 `train_cf.py` 支持前四个模型各自的 original / item-only 版本，以及 FISM 的 native 版本，共九个版本。
+新增入口 `train_cf.py` 支持五个模型各自的 original / item-only 版本，共十个版本。
 它复用相邻 `ItemGCN` 仓库中的模型代码，读取 AlphaFree 原始划分，并实现与
 AlphaFree 相同的 Recall、NDCG、HR 定义及候选屏蔽规则。
 原始 `main.py`、AlphaFree 模型、下载脚本和已有 ItemGCN 模型均未被此适配改写。
@@ -19,7 +19,8 @@ AlphaFree 相同的 Recall、NDCG、HR 定义及候选屏蔽规则。
 | `--model directau` | `DirectAU` | `XDirectAU` | alignment + gamma × uniformity，不采负例 |
 
 `--model fism --variant native` 单独运行 FISM-BCE：两个 item 表、训练历史聚合、排除当前目标、
-可选用户标量 bias；没有 GNN，也不另造一个 item-only 版本。实现与本地 MixGCF FISM 的目标一致，
+可选用户标量 bias；没有 GNN。native 是 original 的兼容别名，item-only 使用可调的 B 聚合。
+original 实现与本地 MixGCF FISM 的目标一致，
 不需要复制 MixGCF 仓库。配置、公式及搜索命令见 [FISM_CF.md](FISM_CF.md)。
 
 注意：本地类名 `XSimGCL` 是你的 item-only SimGCL，不是论文中的 XSimGCL 算法。
@@ -80,7 +81,7 @@ nohup python train_cf.py --dataset Steam --model directau --variant both --devic
 ```
 
 这些 bash 示例在 AlphaFree 目录运行。没有 GPU 时可改为 `--device cpu`，但完整训练可能较慢。
-`--model all --variant both` 会依次训练九个版本（含 FISM native），不会并发占满显存。
+`--model all --variant both` 会依次训练十个版本，不会并发占满显存。
 省略设备参数时自动选择可用 GPU，否则 CPU。
 正式训练必须移除短跑参数，默认值 0 表示不限制。
 

@@ -2,7 +2,7 @@
 
 这是当前采用的搜索方案，替代先前 CF_TUNING.md 的分阶段草案。
 入口为 `search_cf.py`，实际配置为 `configs/cf_joint_search.json`。
-前四类模型的参数网格对应旧 ItemGCN/experiments.json；FISM 是新增的独立基线网格。
+前四类模型的参数网格对应旧 ItemGCN/experiments.json；FISM 使用固定配方加 29 种聚合。
 评估/早停遵循新的 AlphaFree 适配框架。
 不把旧实验的 test Recall 选配置方式迁移过来：本次只按 validation Recall@20 选配置。
 
@@ -14,12 +14,13 @@
 | StabCF | n-negs={64,32,16} × window-length={5,10} × alpha={20,21} | 12 | 348 |
 | SimGCL | cl-rate={0.5,0.2,2} × eps={0.1,0.5}，ssl-temp=0.2 | 6 | 174 |
 | DirectAU | gamma={0.2,0.5,1,2,5,10} | 6 | 174 |
-| 每数据集、每 seed 合计 | | 25 | 725 |
+| FISM-BCE | alpha=0.5、reg=0.001 固定 | 1 | 29 |
+| 每数据集、每 seed 合计 | | 26 | 754 |
 
-此外加入 FISM-BCE `native` 基线：`fism-alpha={0,0.5,1}` ×
-`fism-reg={0.0001,0.001,0.01}`，共 9 组，不与 29 种 B 做笛卡尔积。
+FISM-BCE original 固定 alpha=0.5、reg=0.001；item-only 用 29 种 B 替换历史归一化，
+不额外叠加 alpha。每组保留目标排除；sqrt 与 original 是等价对照。
 固定 4 个负例/正例、scalar user bias 开启、weight-decay=0；细节见 [FISM_CF.md](FISM_CF.md)。
-该网格是新增起始搜索空间，不是从旧 ItemGCN 网格或论文调优结果中获得。
+FISM 配方由用户指定，不是从论文调优结果中获得；Baby/Steam 专用启动命令见上述文档。
 
 公共参数：dim=64、context-hops=3、batch-size=2048、lr=0.001、pool=mean、保留初始层
 （SimGCL 自身按原实现排除初始层）。DirectAU encoder=lightgcn。
@@ -35,7 +36,7 @@
 2. weighted_mean 的 b 取 `{0.25,0.5,0.75,1}`，共 4 种。b=0 与 mean 重复，去掉。
 
 新数据集默认完整包含 sym，不采用旧补跑脚本默认排除 sym 的 28-B 空间。
-原四类模型仍为 750 次/数据集/seed；加上 FISM 后默认总量为 759 次，7 个数据集为 5,313 次/seed。
+原四类模型仍为 750 次/数据集/seed；加上 FISM 后默认总量为 780 次，7 个数据集为 5,460 次/seed。
 item-only 的搜索预算大于 Original，应在论文中披露；不要声称是相等搜索预算实验。
 
 ## 服务器准备
@@ -56,6 +57,10 @@ python search_cf.py --datasets all --num-shards 4 --shard-index 0
 
 不加 `--execute` 或 `--prepare` 时只是 dry-run：校验组合、显示数量，不读大数据文件、不写输出、不训练。
 `--datasets all` 包含 Movie、Book、Video、Baby、Steam、Beauty、Health。
+Steam 原始文件含重复 user-item 记录；读取器默认拒绝重复。
+如需按用户选择的“保留次数建模”协议运行 Steam/all，请给上述及后续 `search_cf.py`
+命令加 `--duplicate-items count`。FISM 的专用 `start_fism_baby_steam.sh` 已内置该选项；
+通用 `start_cf_joint.sh` 未默认切换协议。计数/目标排除/评估语义详见 [FISM_CF.md](FISM_CF.md)。
 
 ## 单 GPU：先跑 Movie
 
@@ -63,7 +68,7 @@ python search_cf.py --datasets all --num-shards 4 --shard-index 0
 python -u search_cf.py --datasets Movie --device cuda:0 --output weights/joint_movie --execute
 ```
 
-这是正式完整搜索，默认 759 个任务，不是短跑。
+这是正式完整搜索，默认 780 个任务，不是短跑。
 可以先用 `--max-jobs 1` 只执行一个完整训练任务，确认资源占用后，再去掉该限制用相同命令续跑。
 同一输出目录的完成任务会跳过；中断任务会重新从头训练，不是恢复优化器的 epoch 级续训。
 
@@ -74,8 +79,8 @@ python search_cf.py --datasets Movie --models stabcf simgcl --phase item-only --
 ```
 
 更改模型或数据集筛选会改变清单，不能复用原完整搜索目录。
-`--phase original` / `item-only` 只筛选前四类模型，不含 FISM；`--phase native` 只筛选 FISM。
-默认 `--phase both` 包含前四类的两个版本及 FISM 的唯一 native 版本。
+`--phase original` / `item-only` 筛选五类模型对应版本；`--phase native` 是只筛选 FISM original 的兼容入口。
+默认 `--phase both` 包含五类模型的两个版本。
 此次代码和默认网格已变更，不要续写旧 750 任务的输出目录或修改旧 manifest。
 若只需要补跑 FISM，使用新的独立目录：
 
@@ -85,13 +90,13 @@ python search_cf.py --datasets Movie --models fism --device cuda:0 --output weig
 
 ## 多 GPU：后台启动
 
-四张卡分摊 Movie 的 759 个任务（使用新的输出目录）：
+四张卡分摊 Movie 的 780 个任务（使用新的输出目录）：
 
 ```bash
 bash start_cf_joint.sh Movie 0,1,2,3 weights/joint_movie_with_fism
 ```
 
-四张卡分摊全部 7 个数据集的 5,313 个任务：
+四张卡分摊全部 7 个数据集的 5,460 个任务：
 
 ```bash
 bash start_cf_joint.sh all 0,1,2,3 weights/joint_all7_with_fism

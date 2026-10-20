@@ -11,7 +11,7 @@ import torch
 from cf.data import CFData
 from cf.evaluate import evaluate
 from cf.models import build_model, model_variants
-from search_cf import build_jobs, read_json
+from search_cf import build_jobs, read_json, representations
 from train_cf import ROOT, load_checkpoint, parse_args, run_one
 
 
@@ -112,28 +112,103 @@ class FISMTests(unittest.TestCase):
         self.assertEqual(evaluate(self.model, self.data, batch_size=1), evaluate(self.model, self.data))
         self.assertEqual(saved['metadata']['source_sha256'], {})
 
-    def test_search_native_grid_and_invalid_variants(self):
-        spec = read_json(ROOT / 'configs/cf_joint_search.json')
-        for phase in ('both', 'native'):
-            jobs = build_jobs(spec, ['amazon_movie'], ['fism'], phase, [2025])
-            self.assertEqual(len(jobs), 9)
-            self.assertEqual({j['variant'] for j in jobs}, {'native'})
-            self.assertEqual({j['B'] for j in jobs}, {'none'})
-        self.assertEqual(model_variants('fism', 'item-only'), [])
-        with self.assertRaises(SystemExit):
-            parse_args(['--model', 'fism', '--variant', 'item-only'])
-        with self.assertRaises(ValueError):
-            build_model(self.data, self.args, 'fism', 'original', 'cpu')
+    def test_fixed_recipe_and_60_jobs(self):
+        for filename in ('cf_joint_search.json', 'fism_baby_steam.json'):
+            spec = read_json(ROOT / 'configs' / filename)
+            jobs = build_jobs(spec, ['amazon_baby', 'steam'], ['fism'], 'both', [2025])
+            self.assertEqual(len(jobs), 60)
+            self.assertEqual(sum(j['variant'] == 'original' for j in jobs), 2)
+            self.assertEqual(len({j['B'] for j in jobs if j['variant'] == 'item-only'}), 29)
+            for job in jobs:
+                self.assertEqual(job['params']['fism-alpha'], .5)
+                self.assertEqual(job['params']['fism-reg'], .001)
+            native = build_jobs(spec, ['steam'], ['fism'], 'native', [2025])
+            self.assertEqual(len(native), 1)
+            self.assertEqual(native[0]['variant'], 'original')
+        self.assertEqual(model_variants('fism', 'item-only'), ['item-only'])
+        parse_args(['--model', 'fism', '--variant', 'item-only'])
+
+    def test_all_B_against_explicit_target_exclusion_and_backward(self):
+        # Unequal item degrees, real item zero, an empty user and a singleton.
+        (self.root / 'train.txt').write_text('0 0 1 2 0 0\n1 0 0\n2\n', encoding='utf-8')
+        data = CFData(self.root, duplicate_items='count')
+        reps = representations(read_json(ROOT / 'configs/fism_baby_steam.json')['representations'])
+        for rep in reps:
+            with self.subTest(B=rep['id']):
+                for key, value in rep['params'].items():
+                    setattr(self.args, key.replace('-', '_'), value)
+                with patch.object(data, 'graph', side_effect=AssertionError('No GNN')):
+                    model = build_model(data, self.args, 'fism', 'item-only', 'cpu')
+                with torch.no_grad():
+                    model.item_bias.copy_(torch.arange(4) * .1)
+                    model.user_bias.copy_(torch.tensor([.2, -.3, .1]))
+                expected = []
+                for user in range(3):
+                    for target in range(4):
+                        history = [item for item in data.train[user] if item != target]
+                        profile = torch.zeros(4)
+                        if history:
+                            weights = model.item_weights[history]
+                            profile = (model.src.weight[history] * weights[:, None]).sum(0)
+                            if model.mode == 'weighted_mean':
+                                profile = profile / weights.sum()
+                            else:
+                                profile = profile / len(history) ** model.a
+                        expected.append((profile * model.dst.weight[target]).sum()
+                                        + model.item_bias[target] + model.user_bias[user])
+                expected = torch.stack(expected).reshape(3, 4)
+                users, targets = torch.arange(3), torch.arange(4).expand(3, -1)
+                torch.testing.assert_close(model.score_targets(users, targets), expected)
+                torch.testing.assert_close(model.score_all(users), expected)
+                # Changing fism_alpha must not stack a second normalization.
+                model.alpha = .99
+                torch.testing.assert_close(model.score_all(users), expected)
+                self.assertNotIn('item_weights', model.state_dict())
+                loss = model(data.batch(data.pairs, model, 'cpu', 5))[0]
+                loss.backward()
+                self.assertTrue(torch.isfinite(loss))
+                self.assertTrue(all(torch.isfinite(p.grad).all() for p in model.parameters()))
+
+    def test_sqrt_matches_original_scores_losses_and_gradients(self):
+        (self.root / 'train.txt').write_text('0 0 1 0\n1 2 2\n2\n', encoding='utf-8')
+        self.data = CFData(self.root, duplicate_items='count')
+        self.model = build_model(self.data, self.args, 'fism', 'original', 'cpu')
+        self.args.b_mode = 'sqrt'
+        model = build_model(self.data, self.args, 'fism', 'item-only', 'cpu')
+        model.load_state_dict(self.model.state_dict(), strict=True)
+        torch.testing.assert_close(model.score_all([0, 1, 2]), self.model.score_all([0, 1, 2]))
+        batch = self.data.batch(self.data.pairs, model, 'cpu', 5)
+        losses, expected = model(batch), self.model(batch)
+        for a, b in zip(losses, expected):
+            torch.testing.assert_close(a, b)
+        losses[0].backward()
+        expected[0].backward()
+        for a, b in zip(model.parameters(), self.model.parameters()):
+            torch.testing.assert_close(a.grad, b.grad)
+
+    def test_counted_original_matches_expanded_history(self):
+        (self.root / 'train.txt').write_text('0 0 0 1\n1 2 2 2\n2\n', encoding='utf-8')
+        data = CFData(self.root, duplicate_items='count')
+        model = build_model(data, self.args, 'fism', 'original', 'cpu')
+        expected = []
+        for user in range(3):
+            for item in range(4):
+                history = [i for i in data.train[user] if i != item]
+                profile = model.src.weight[history].sum(0) / max(1, len(history)) ** .5
+                expected.append((profile * model.dst.weight[item]).sum())
+        torch.testing.assert_close(model.score_all([0, 1, 2]).flatten(), torch.stack(expected))
+        self.assertEqual(float(model.score_pairs(torch.tensor([1]), torch.tensor([2]))), 0.)
 
     @unittest.skipUnless(torch.cuda.is_available(), 'CUDA unavailable')
     def test_cuda_fism(self):
-        model = self.model.to('cuda:0')
-        batch = self.data.batch(self.data.pairs, model, 'cuda:0', 5)
-        loss = model(batch)[0]
-        loss.backward()
-        self.assertTrue(torch.isfinite(loss))
-        self.assertTrue(all(torch.isfinite(p.grad).all() for p in model.parameters()))
-        evaluate(model, self.data)
+        for variant in ('original', 'item-only'):
+            model = build_model(self.data, self.args, 'fism', variant, 'cuda:0')
+            batch = self.data.batch(self.data.pairs, model, 'cuda:0', 5)
+            loss = model(batch)[0]
+            loss.backward()
+            self.assertTrue(torch.isfinite(loss))
+            self.assertTrue(all(torch.isfinite(p.grad).all() for p in model.parameters()))
+            evaluate(model, self.data)
 
 
 if __name__ == '__main__':

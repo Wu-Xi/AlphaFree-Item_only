@@ -12,10 +12,8 @@ MODEL_FAMILIES = PAIRED_FAMILIES + ('fism',)
 
 
 def model_variants(family, phase):
-    if family == 'fism':
-        return ['native'] if phase in ('both', 'native') else []
     if phase == 'native':
-        return []
+        return ['original'] if family == 'fism' else []
     return ['original', 'item-only'] if phase == 'both' else [phase]
 
 
@@ -38,10 +36,10 @@ def source_hashes(root):
 
 def build_model(data, args, model_name, variant, device, graph=None, aggregation=None):
     if model_name == 'fism':
-        if variant != 'native':
-            raise ValueError('FISM has one native variant; use --variant native or both')
-        from .fism import FISM
-        return FISM(data, args).to(device)
+        if variant not in ('original', 'native', 'item-only'):
+            raise ValueError('Unknown FISM variant: ' + variant)
+        from .fism import FISM, FISMB
+        return (FISMB(data, args) if variant == 'item-only' else FISM(data, args)).to(device)
     module = importlib.import_module(source_package(args.itemgcn_root) + '.LightGCN')
     classes = {'lightgcn-rns': ('LightGCN', 'XLightGCN'),
                'stabcf': ('LightGCN', 'XLightGCN'),

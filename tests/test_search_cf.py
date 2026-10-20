@@ -33,11 +33,11 @@ class SearchTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_759_jobs_and_29_unique_B(self):
-        self.assertEqual(len(self.jobs), 759)
+    def test_780_jobs_and_29_unique_B(self):
+        self.assertEqual(len(self.jobs), 780)
         counts = Counter((j['model'], j['variant']) for j in self.jobs)
-        self.assertEqual(counts['fism', 'native'], 9)
-        self.assertEqual({j['B'] for j in self.jobs if j['model'] == 'fism'}, {'none'})
+        self.assertEqual(counts['fism', 'original'], 1)
+        self.assertEqual(counts['fism', 'item-only'], 29)
         for model, recipes in [('lightgcn-rns', 1), ('stabcf', 12), ('simgcl', 6), ('directau', 6)]:
             self.assertEqual(counts[model, 'original'], recipes)
             self.assertEqual(counts[model, 'item-only'], recipes * 29)
@@ -70,8 +70,8 @@ class SearchTests(unittest.TestCase):
     def test_shards_partition_all_jobs_and_seeds(self):
         parts = [self.jobs[i::8] for i in range(8)]
         ids = [job['id'] for part in parts for job in part]
-        self.assertEqual(len(ids), 759)
-        self.assertEqual(len(set(ids)), 759)
+        self.assertEqual(len(ids), 780)
+        self.assertEqual(len(set(ids)), 780)
         multi = build_jobs(self.spec, ['amazon_movie', 'steam'], ['stabcf'], 'both', [2025, 2026])
         self.assertEqual(len(multi), 12 * 30 * 2 * 2)
 
@@ -81,6 +81,20 @@ class SearchTests(unittest.TestCase):
         freeze_manifest(root, {'jobs': self.jobs})
         with self.assertRaisesRegex(ValueError, 'mismatch'):
             freeze_manifest(root, {'jobs': self.jobs[:1]})
+
+    def test_count_policy_reaches_loader_and_is_frozen(self):
+        path = self.options.data_root / 'amazon_movie/cf_data/train.txt'
+        path.write_text('0 0 1 0\n1 1 2\n2 2 3\n', encoding='utf-8')
+        argv = ['--datasets', 'Movie', '--models', 'fism', '--device', 'cpu',
+                '--smoke', '--duplicate-items', 'count', '--data-root', str(self.options.data_root),
+                '--output', str(self.options.output)]
+        manifest = main(argv + ['--prepare'])
+        self.assertEqual(manifest['runtime']['duplicate_items'], 'count')
+        main(argv + ['--execute'])
+        result = completed_result(self.options.output, manifest['jobs'][0])
+        self.assertIsNotNone(result)
+        with self.assertRaisesRegex(ValueError, 'mismatch'):
+            main(argv + ['--duplicate-items', 'error', '--prepare'])
 
     def test_training_resume_and_smoke_never_selected_best(self):
         job = self.jobs[1]  # RNS item-only, first B.
@@ -144,7 +158,7 @@ class SearchTests(unittest.TestCase):
     def test_dry_run_does_not_write_or_require_gpu(self):
         root = self.root / 'dry_run'
         result = main(['--datasets', 'Movie', '--output', str(root)])
-        self.assertEqual(len(result), 759)
+        self.assertEqual(len(result), 780)
         self.assertFalse(root.exists())
 
     def test_prepare_then_resume_one_shard(self):

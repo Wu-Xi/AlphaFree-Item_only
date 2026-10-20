@@ -23,6 +23,8 @@ def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--dataset', default='Movie', help='Movie/Book/Video/Baby/Steam/Beauty/Health or canonical name')
     p.add_argument('--data-root', type=Path, default=ROOT / 'data')
+    p.add_argument('--duplicate-items', choices=['error', 'count'], default='error',
+                   help='count preserves repeated interactions in sampling, history weights and degrees')
     p.add_argument('--itemgcn-root', type=Path, default=ROOT.parent / 'ItemGCN')
     p.add_argument('--output-root', type=Path, default=ROOT / 'weights' / 'cf')
     p.add_argument('--model', choices=list(MODEL_FAMILIES) + ['rns', 'all'], default='stabcf')
@@ -52,8 +54,8 @@ def parse_args(argv=None):
     p.add_argument('--ssl-temp', type=float, default=.2)
     p.add_argument('--encoder', choices=['mf', 'lightgcn'], default='lightgcn', help='DirectAU encoder')
     p.add_argument('--gamma', type=float, default=1., help='DirectAU uniformity weight')
-    p.add_argument('--fism-alpha', type=float, default=0., help='FISM history-length exponent')
-    p.add_argument('--fism-reg', type=float, default=.01, help='FISM unsquared global norm coefficient for each item table')
+    p.add_argument('--fism-alpha', type=float, default=.5, help='Original FISM history exponent; item-only uses B instead')
+    p.add_argument('--fism-reg', type=float, default=.001, help='FISM unsquared global norm coefficient for each item table')
     p.add_argument('--fism-negatives', type=int, default=4, help='FISM BCE negatives per positive')
     p.add_argument('--fism-user-bias', type=int, choices=[0, 1], default=1, help='Scalar user bias, not a user embedding')
     p.add_argument('--b-mode', choices=['sum', 'mean', 'sqrt', 'sym', 'degree', 'weighted_mean'], default='sym')
@@ -83,7 +85,7 @@ def parse_args(argv=None):
     if args.dataset not in DATASETS.values():
         p.error('Unknown dataset: ' + args.dataset)
     if args.model != 'all' and not model_variants(args.model, args.variant):
-        p.error('FISM uses native/both; other models use original/item-only/both')
+        p.error('Use original/item-only/both; native is a legacy alias for FISM original')
     return args
 
 
@@ -125,6 +127,8 @@ def run_one(data, args, family, variant, device, graph, aggregation, run_dir=Non
                     sampling='shuffled interaction pairs; negatives exclude training positives only',
                     negative_sample_count=getattr(model, 'negative_sample_count', 0),
                     requires_history=getattr(model, 'requires_history', False),
+                    aggregation_protocol=getattr(model, 'aggregation_protocol', None),
+                    evaluation_truth='unique item IDs, matching AlphaFree C++ evaluator',
                     parameters=sum(p.numel() for p in model.parameters()),
                     parameter_shapes={n: list(p.shape) for n, p in model.named_parameters()},
                     source_sha256={} if family == 'fism' else source_hashes(args.itemgcn_root), torch_version=str(torch.__version__),
@@ -196,7 +200,7 @@ def main(argv=None):
                           if args.device == 'auto' else args.device)
     if device.type == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('CUDA requested but not available in this Python environment')
-    data = CFData(args.data_root / args.dataset / 'cf_data')
+    data = CFData(args.data_root / args.dataset / 'cf_data', args.duplicate_items)
     print(json.dumps(data.stats), flush=True)
     if args.max_steps or args.eval_users:
         print('SMOKE TEST: truncated training/evaluation; not a benchmark result.', flush=True)
@@ -204,7 +208,7 @@ def main(argv=None):
     runs = [(family, variant) for family in families for variant in model_variants(family, args.variant)]
     graph = data.graph() if any(family != 'fism' for family, _ in runs) else None
     aggregation = (data.aggregation(args.b_mode, args.b_a, args.b_b)
-                   if any(variant == 'item-only' for _, variant in runs) else None)
+                   if any(variant == 'item-only' and family != 'fism' for family, variant in runs) else None)
     results = [run_one(data, args, family, variant, device, graph, aggregation)
                for family, variant in runs]
     summary = args.output_root / args.dataset / ('summary_' + datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '.json')

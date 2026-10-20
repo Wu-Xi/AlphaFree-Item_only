@@ -54,6 +54,26 @@ class CFTests(unittest.TestCase):
             np.testing.assert_allclose(self.data.aggregation(mode, .3, .2).toarray(),
                                        reference.build_B(self.data.pairs, mode, .3, .2).toarray(), atol=1e-7)
 
+    def test_counted_duplicates_preserve_events_and_unique_evaluation(self):
+        content = '0 0 1 0\n1 1 2\n2 2 3\n'
+        path = self.root / 'train.txt'
+        path.write_text(content, encoding='utf-8')
+        (self.root / 'valid.txt').write_text('0 2 2\n1 3\n2 4\n3 0\n', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'duplicate'):
+            CFData(self.root)
+        data = CFData(self.root, duplicate_items='count')
+        self.assertEqual(data.train[0], [0, 1, 0])
+        self.assertEqual(len(data.pairs), 7)
+        self.assertEqual(data.interactions[0, 0], 2.)
+        self.assertEqual(data.stats['repeated_occurrences']['train'], 1)
+        self.assertEqual(data.stats['repeated_occurrences']['valid'], 1)
+        self.assertEqual(path.read_text(encoding='utf-8'), content)
+        np.testing.assert_allclose(data.aggregation('sum').toarray(), data.interactions.toarray())
+        np.testing.assert_allclose(rank_metrics([2], data.splits['valid'][0], 20), [1, 1, 1])
+        path.write_text(content + '0 2\n', encoding='utf-8')
+        with self.assertRaisesRegex(ValueError, 'duplicate'):
+            CFData(self.root, duplicate_items='count')
+
     def test_all_eight_gradients_sampling_checkpoint(self):
         for family in MODEL_FAMILIES:
             for variant in ('original', 'item-only'):

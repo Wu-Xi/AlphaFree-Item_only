@@ -8,7 +8,7 @@ ACM Web Conference 2026 (WWW '26)
 
 This checkout also includes a separate `train_cf.py` entry point for the local
 ItemGCN implementations of LightGCN-RNS, StabCF, SimGCL, and DirectAU, each with original and
-item-only variants, plus a native FISM-BCE baseline (see [FISM_CF.md](FISM_CF.md)).
+item-only variants, plus FISM-BCE original and 29 configurable history aggregations (see [FISM_CF.md](FISM_CF.md)).
 FISM uses two item tables and optional scalar user biases, with no user embedding table or GNN.
 It uses the AlphaFree interaction splits and evaluation masks
 without language-model preprocessing or Cython compilation. See

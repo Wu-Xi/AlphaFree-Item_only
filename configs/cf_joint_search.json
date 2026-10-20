@@ -22,8 +22,9 @@
       "grid": {"gamma": [0.2, 0.5, 1.0, 2.0, 5.0, 10.0]}
     },
     "fism": {
-      "fixed": {"l2": 0.0, "weight-decay": 0.0, "fism-negatives": 4, "fism-user-bias": 1},
-      "grid": {"fism-alpha": [0.0, 0.5, 1.0], "fism-reg": [0.0001, 0.001, 0.01]}
+      "fixed": {"l2": 0.0, "weight-decay": 0.0, "fism-negatives": 4, "fism-user-bias": 1,
+                "fism-alpha": 0.5, "fism-reg": 0.001},
+      "grid": {}
     }
   },
   "representations": {

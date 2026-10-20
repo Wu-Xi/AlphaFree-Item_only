@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "description": "FISM-BCE: original alpha=.5 reg=.001, and the same recipe x 29 target-excluded B constructions.",
+  "common": {
+    "epochs": 1000, "eval-every": 5, "patience": 20, "top-k": 20,
+    "dim": 64, "batch-size": 2048, "lr": 0.001, "l2": 0.0, "weight-decay": 0.0
+  },
+  "models": {
+    "fism": {
+      "fixed": {"fism-alpha": 0.5, "fism-reg": 0.001, "fism-negatives": 4, "fism-user-bias": 1},
+      "grid": {}
+    }
+  },
+  "representations": {
+    "degree_values": [0.0, 0.25, 0.5, 0.75, 1.0],
+    "weighted_mean_values": [0.25, 0.5, 0.75, 1.0]
+  }
+}

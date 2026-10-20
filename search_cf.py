@@ -102,7 +102,7 @@ def job_args(job, options):
             '--seed', str(job['seed']), '--data-root', str(options.data_root),
             '--itemgcn-root', str(options.itemgcn_root), '--device', options.device,
             '--eval-batch-size', str(options.eval_batch_size), '--threads', str(options.threads),
-            '--validation-only']
+            '--duplicate-items', options.duplicate_items, '--validation-only']
     params = dict(job['params'])
     if options.smoke:
         params.update({'epochs': 1, 'batch-size': 32})
@@ -207,7 +207,7 @@ def execute_job(root, job, args, data, graph, device, retry_failed=False):
             with (attempt_dir / 'train.log').open('w', encoding='utf-8', buffering=1) as log:
                 with redirect_stdout(log), redirect_stderr(log):
                     b = (data.aggregation(args.b_mode, args.b_a, args.b_b)
-                         if job['variant'] == 'item-only' else None)
+                         if job['variant'] == 'item-only' and job['model'] != 'fism' else None)
                     run_one(data, args, job['model'], job['variant'], device, graph, b,
                             run_dir=attempt_dir / 'run')
             status['state'] = 'completed'
@@ -234,6 +234,7 @@ def parse_args(argv=None):
     p.add_argument('--phase', choices=['original', 'item-only', 'both', 'native'], default='both')
     p.add_argument('--seeds', nargs='+', type=int, default=[2025])
     p.add_argument('--data-root', type=Path, default=ROOT / 'data')
+    p.add_argument('--duplicate-items', choices=['error', 'count'], default='error')
     p.add_argument('--itemgcn-root', type=Path, default=ROOT.parent / 'ItemGCN')
     p.add_argument('--output', type=Path)
     p.add_argument('--device', default='cuda:0')
@@ -317,7 +318,7 @@ def main(argv=None):
                                     [ROOT / 'train_cf.py', Path(__file__).resolve()] + sorted((ROOT / 'cf').glob('*.py'))},
                     runtime=dict(torch=str(torch.__version__), python=sys.version.split()[0],
                                  eval_batch_size=options.eval_batch_size, threads=options.threads,
-                                 smoke=options.smoke))
+                                 smoke=options.smoke, duplicate_items=options.duplicate_items))
     freeze_manifest(root, manifest)
     if options.prepare:
         print('Prepared manifest; no training launched: ' + str(root / 'manifest.json'), flush=True)
@@ -332,7 +333,7 @@ def main(argv=None):
             counts['skipped'] += 1
             continue
         if active_dataset != job['dataset']:
-            data = CFData(options.data_root / job['dataset'] / 'cf_data')
+            data = CFData(options.data_root / job['dataset'] / 'cf_data', options.duplicate_items)
             graph = data.graph() if any(j['model'] != 'fism' for j in selected) else None
             active_dataset = job['dataset']
         args = job_args(job, options)
