@@ -1,0 +1,36 @@
+{
+  "description": "SUPERSEDED staged proposal. Active search uses cf_joint_search.json and search_cf.py. This file is not consumed by training.",
+  "selection_metric": "valid recall@20",
+  "fixed": {
+    "dim": 64, "batch-size": 2048, "epochs": 1000,
+    "eval-every": 5, "patience": 20, "top-k": 20,
+    "seed": 2025, "weight-decay": 0.0, "pool": "mean",
+    "encoder": "lightgcn", "b-mode": "sym", "validation-only": true
+  },
+  "stage1": {
+    "lightgcn-rns": {
+      "grid": {"lr": [0.0001, 0.0005, 0.001], "context-hops": [1, 2, 3], "l2": [0.0, 0.00001, 0.0001, 0.001]},
+      "fixed": {"n-negs": 1}
+    },
+    "stabcf": {
+      "grid": {"lr": [0.0001, 0.0005, 0.001], "context-hops": [1, 2, 3], "l2": [0.0, 0.00001, 0.0001, 0.001]},
+      "fixed": {"n-negs": 64, "window-length": 5, "alpha": 1.0}
+    },
+    "simgcl": {
+      "grid": {"lr": [0.0001, 0.0005, 0.001], "context-hops": [1, 2, 3], "l2": [0.0, 0.00001, 0.0001, 0.001]},
+      "fixed": {"eps": 0.1, "cl-rate": 0.5, "ssl-temp": 0.2}
+    },
+    "directau": {
+      "grid": {"lr": [0.0001, 0.0005, 0.001], "context-hops": [1, 2, 3], "gamma": [0.1, 0.5, 1.0, 2.0]},
+      "fixed": {"l2": 0.0}
+    }
+  },
+  "stage2": {
+    "inherit": "Each model/variant's own stage1 best VALID configuration; tune each grid separately, not one cross-model product.",
+    "stabcf": {"n-negs": [16, 32, 64], "window-length": [1, 3, 5], "alpha": [0.1, 1.0, 10.0]},
+    "simgcl": {"eps": [0.05, 0.1, 0.2], "cl-rate": [0.01, 0.05, 0.1, 0.5], "ssl-temp": [0.1, 0.2, 0.5]}
+  },
+  "item_only_ablation": {"b-mode": ["sym", "mean", "sqrt"]},
+  "final_seeds": [2025, 2026, 2027, 2028, 2029],
+  "low_budget": {"stage1_hops": [2], "stage1_configs_per_model_variant": 12}
+}

@@ -1,0 +1,71 @@
+# Downloaded datasets, language features and preprocessing caches.
+# Keep dataset-management scripts and documentation visible to Git.
+/data/*
+!/data/*.sh
+!/data/*.py
+!/data/*.ps1
+!/data/*.md
+!/data/.gitkeep
+
+# Training checkpoints, search manifests/results and evaluation outputs.
+/weights/
+/pretrained/
+/outputs/
+/results/
+/runs/
+*.pt
+*.pth
+*.pth.tar
+*.checkpoint
+*.ckpt
+
+# Runtime logs (already tracked reference logs remain tracked).
+*.log
+*.out
+nohup.out
+/scheduler_logs/
+
+# Python caches, environments and test reports.
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.venv/
+venv/
+*.egg-info/
+.ipynb_checkpoints/
+
+# Build products, not evaluator/Cython source directories.
+build/
+dist/
+*.so
+*.pyd
+*.dll
+*.o
+*.obj
+/models/base/util/cython/arg_topk.c
+/models/base/util/cython/arg_topk.cpp
+/models/base/util/cython/random_choice.c
+/models/base/util/cython/random_choice.cpp
+/models/base/util/cython/tools.c
+/models/base/util/cython/tools.cpp
+
+# Local editor settings, credentials and temporary files.
+/.vscode/
+/.idea/
+.env
+.env.*
+!.env.example
+!.env.sample
+*.tmp
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db

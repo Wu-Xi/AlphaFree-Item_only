@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "description": "Legacy ItemGCN model grid crossed with all 29 B constructions. Select by validation Recall@20, never test.",
+  "common": {
+    "epochs": 1000, "eval-every": 5, "patience": 20, "top-k": 20,
+    "dim": 64, "context-hops": 3, "batch-size": 2048,
+    "lr": 0.001, "l2": 0.001, "weight-decay": 0.0,
+    "pool": "mean", "encoder": "lightgcn"
+  },
+  "models": {
+    "lightgcn-rns": {"fixed": {"n-negs": 1}, "grid": {}},
+    "stabcf": {
+      "fixed": {},
+      "grid": {"n-negs": [64, 32, 16], "window-length": [5, 10], "alpha": [20.0, 21.0]}
+    },
+    "simgcl": {
+      "fixed": {"ssl-temp": 0.2},
+      "grid": {"cl-rate": [0.5, 0.2, 2.0], "eps": [0.1, 0.5]}
+    },
+    "directau": {
+      "fixed": {"l2": 0.0, "weight-decay": 0.001},
+      "grid": {"gamma": [0.2, 0.5, 1.0, 2.0, 5.0, 10.0]}
+    },
+    "fism": {
+      "fixed": {"l2": 0.0, "weight-decay": 0.0, "fism-negatives": 4, "fism-user-bias": 1},
+      "grid": {"fism-alpha": [0.0, 0.5, 1.0], "fism-reg": [0.0001, 0.001, 0.01]}
+    }
+  },
+  "representations": {
+    "degree_values": [0.0, 0.25, 0.5, 0.75, 1.0],
+    "weighted_mean_values": [0.25, 0.5, 0.75, 1.0]
+  }
+}
