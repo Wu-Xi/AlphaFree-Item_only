@@ -20,7 +20,7 @@ if __name__ == '__main__':
         
     # Phase train : training model from scratch.
     elif args.phase == 'train':
-        if args.model_name == 'AlphaFree2':
+        if args.model_name == 'AlphaFree2' or args.validation_only:
             from models.base.AlphaFree2RS import AlphaFree2RS
             RS = AlphaFree2RS(args, special_args)
         else:

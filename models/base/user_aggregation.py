@@ -5,7 +5,8 @@ import numpy as np
 from scipy import sparse
 
 
-def build_user_aggregation(train_history, n_users, n_items, mode='mean', a=.5, b=.5):
+def build_user_aggregation(train_history, n_users, n_items, mode='mean', a=.5, b=.5,
+                           preserve_counts=False):
     if not np.isfinite([a, b]).all() or min(a, b) < 0:
         raise ValueError('B exponents must be finite and nonnegative')
     presets = {'sum': (0., 0.), 'mean': (1., 0.), 'sqrt': (.5, 0.), 'sym': (.5, .5)}
@@ -19,7 +20,9 @@ def build_user_aggregation(train_history, n_users, n_items, mode='mean', a=.5, b
     for user, items in train_history.items():
         if not 0 <= user < n_users:
             raise ValueError('User ID outside catalog')
-        items = sorted(set(items))
+        # AlphaFree2 uses counts, matching original AlphaFree. Keep the legacy
+        # default for the independent AlphaFree3 experiment.
+        items = sorted(items) if preserve_counts else sorted(set(items))
         if any(not 0 <= item < n_items for item in items):
             raise ValueError('Item ID outside catalog')
         rows.extend([user] * len(items))

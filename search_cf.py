@@ -102,7 +102,12 @@ def job_args(job, options):
             '--seed', str(job['seed']), '--data-root', str(options.data_root),
             '--itemgcn-root', str(options.itemgcn_root), '--device', options.device,
             '--eval-batch-size', str(options.eval_batch_size), '--threads', str(options.threads),
-            '--duplicate-items', options.duplicate_items, '--validation-only']
+            '--duplicate-items', options.duplicate_items,
+            '--log-every', str(options.log_every if options.log_every is not None else 0)]
+    if not options.test_after_train:
+        argv += ['--validation-only']
+    if options.delete_checkpoint_after_test:
+        argv += ['--delete-checkpoint-after-test']
     params = dict(job['params'])
     if options.smoke:
         params.update({'epochs': 1, 'batch-size': 32})
@@ -149,11 +154,23 @@ def completed_result(root, job):
     if status.get('state') != 'completed' or status.get('job_digest') != digest(job):
         return None
     run_dir = directory / status['attempt'] / 'run'
-    if not (run_dir / 'result.json').is_file() or not (run_dir / 'best.pt').is_file():
+    if not (run_dir / 'result.json').is_file():
         return None
     result = read_json(run_dir / 'result.json')
-    if not result.get('validation_only') or result.get('test') is not None:
-        raise ValueError('Search result unexpectedly contains test metrics: ' + str(run_dir))
+    if result.get('validation_only'):
+        if result.get('test') is not None:
+            raise ValueError('Validation-only result unexpectedly contains test metrics: ' + str(run_dir))
+    else:
+        metrics = result.get('test')
+        if not isinstance(metrics, dict) or not all(
+                isinstance(metrics.get(k), (int, float)) and math.isfinite(metrics[k])
+                for k in ('recall@20', 'ndcg@20', 'hr@20', 'users')) or metrics['users'] <= 0:
+            raise ValueError('Missing or invalid test metrics: ' + str(run_dir))
+    if not (run_dir / 'best.pt').is_file():
+        if (result.get('checkpoint_retention') != 'delete_after_test'
+                or result.get('validation_only') or not result.get('test')
+                or not result.get('checkpoint_sha256') or not (run_dir / 'training.txt').is_file()):
+            return None
     if any(result[key] != job[key] for key in ('dataset', 'model', 'variant', 'seed')):
         raise ValueError('Search result does not match job: ' + str(run_dir))
     if not math.isfinite(result['valid']['recall@20']):
@@ -241,6 +258,9 @@ def parse_args(argv=None):
     p.add_argument('--device', default='cuda:0')
     p.add_argument('--eval-batch-size', type=int, default=128)
     p.add_argument('--threads', type=int, default=4)
+    p.add_argument('--test-after-train', action='store_true', help='Test each validation-selected checkpoint immediately')
+    p.add_argument('--delete-checkpoint-after-test', action='store_true', help='Remove each checkpoint after saving its test results')
+    p.add_argument('--log-every', type=int, default=None, help='Step log interval; 0 disables step logs')
     p.add_argument('--num-shards', type=int, default=1)
     p.add_argument('--shard-index', type=int, default=0)
     p.add_argument('--max-jobs', type=int, help='Attempt cap for this invocation; 0 means unlimited')
@@ -256,6 +276,8 @@ def parse_args(argv=None):
         p.error('Require 0 <= shard-index < num-shards')
     if args.threads < 1 or args.eval_batch_size < 1 or (args.max_jobs is not None and args.max_jobs < 0):
         p.error('Invalid threads/batch-size/max-jobs')
+    if args.log_every is not None and args.log_every < 0:
+        p.error('log-every must be nonnegative')
     if not args.seeds or len(set(args.seeds)) != len(args.seeds) or any(not 0 <= s < 2**32 for s in args.seeds):
         p.error('Seeds must be unique uint32 values')
     if 'all' in args.models and len(args.models) != 1:
@@ -287,6 +309,19 @@ def main(argv=None):
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return report
     spec = read_json(options.config)
+    execution = spec.get('execution', {})
+    if set(execution) - {'test_after_train', 'delete_checkpoint_after_test', 'log_every'}:
+        raise ValueError('Unknown execution settings')
+    for name in ('test_after_train', 'delete_checkpoint_after_test'):
+        if name in execution and not isinstance(execution[name], bool):
+            raise ValueError(name + ' must be boolean')
+        setattr(options, name, getattr(options, name) or execution.get(name, False))
+    if options.log_every is None:
+        options.log_every = execution.get('log_every', 0)
+    if type(options.log_every) is not int or options.log_every < 0:
+        raise ValueError('log_every must be a nonnegative integer')
+    if options.delete_checkpoint_after_test and not options.test_after_train:
+        raise ValueError('Deleting checkpoints requires test_after_train')
     if spec.get('version') != 1 or spec['common'].get('top-k') != 20:
         raise ValueError('Search requires config version 1 and top-k=20')
     jobs = build_jobs(spec, options.datasets, options.models, options.phase, options.seeds)
@@ -319,7 +354,10 @@ def main(argv=None):
                                     [ROOT / 'train_cf.py', Path(__file__).resolve()] + sorted((ROOT / 'cf').glob('*.py'))},
                     runtime=dict(torch=str(torch.__version__), python=sys.version.split()[0],
                                  eval_batch_size=options.eval_batch_size, threads=options.threads,
-                                 smoke=options.smoke, duplicate_items=options.duplicate_items))
+                                 smoke=options.smoke, duplicate_items=options.duplicate_items,
+                                 test_after_train=options.test_after_train,
+                                 delete_checkpoint_after_test=options.delete_checkpoint_after_test,
+                                 log_every=options.log_every))
     freeze_manifest(root, manifest)
     if options.prepare:
         print('Prepared manifest; no training launched: ' + str(root / 'manifest.json'), flush=True)

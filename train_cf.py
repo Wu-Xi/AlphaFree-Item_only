@@ -1,11 +1,16 @@
 """Train local ItemGCN baselines on AlphaFree data without language-model dependencies."""
 import argparse
+from contextlib import redirect_stdout, redirect_stderr
 import datetime
 import inspect
 import json
 import math
+import os
 import random
+import sys
+import tempfile
 import time
+import traceback
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +41,8 @@ def parse_args(argv=None):
     p.add_argument('--eval-every', type=int, default=5)
     p.add_argument('--patience', type=int, default=20, help='Validation evaluations without improvement')
     p.add_argument('--validation-only', action='store_true', help='Tuning: do not compute test metrics')
+    p.add_argument('--delete-checkpoint-after-test', action='store_true',
+                   help='Delete this run best.pt only after test results and training.txt are saved')
     p.add_argument('--top-k', type=int, default=20)
     p.add_argument('--seed', type=int, default=2025)
     p.add_argument('--threads', type=int, default=4, help='PyTorch CPU threads')
@@ -55,7 +62,7 @@ def parse_args(argv=None):
     p.add_argument('--encoder', choices=['mf', 'lightgcn'], default='lightgcn', help='DirectAU encoder')
     p.add_argument('--gamma', type=float, default=1., help='DirectAU uniformity weight')
     p.add_argument('--fism-alpha', type=float, default=.5, help='Original FISM history exponent; item-only uses B instead')
-    p.add_argument('--fism-reg', type=float, default=.001, help='FISM unsquared global norm coefficient for each item table')
+    p.add_argument('--fism-reg', type=float, default=1e-6, help='FISM unsquared global norm coefficient for each item table')
     p.add_argument('--fism-negatives', type=int, default=4, help='FISM BCE negatives per positive')
     p.add_argument('--fism-user-bias', type=int, choices=[0, 1], default=1, help='Scalar user bias, not a user embedding')
     p.add_argument('--b-mode', choices=['sum', 'mean', 'sqrt', 'sym', 'degree', 'weighted_mean'], default='sym')
@@ -63,16 +70,20 @@ def parse_args(argv=None):
     p.add_argument('--b-b', type=float, default=.5)
     p.add_argument('--max-steps', type=int, default=0, help='SMOKE ONLY: cap batches per epoch; 0 means full')
     p.add_argument('--eval-users', type=int, default=0, help='SMOKE ONLY: evaluate first N users; 0 means all')
-    p.add_argument('--log-every', type=int, default=50)
+    p.add_argument('--log-every', type=int, default=0, help='Step log interval; 0 disables step logs')
     args = p.parse_args(argv)
     if args.model == 'rns':
         args.model = 'lightgcn-rns'
     for key in ('epochs', 'batch_size', 'eval_batch_size', 'eval_every', 'patience', 'top_k',
-                'threads', 'dim', 'n_negs', 'window_length', 'log_every', 'fism_negatives'):
+                'threads', 'dim', 'n_negs', 'window_length', 'fism_negatives'):
         if getattr(args, key) < 1:
             p.error(key + ' must be positive')
     if args.context_hops < 0 or min(args.max_steps, args.eval_users) < 0:
         p.error('hops and smoke limits must be nonnegative')
+    if args.log_every < 0:
+        p.error('log-every must be nonnegative')
+    if args.delete_checkpoint_after_test and args.validation_only:
+        p.error('Deleting checkpoints requires test evaluation; remove --validation-only')
     if args.context_hops == 0 and (args.model in ('all', 'simgcl') or not args.embedding0):
         p.error('SimGCL or excluding layer 0 requires at least one propagation layer')
     for key in ('lr', 'alpha', 'ssl_temp'):
@@ -100,8 +111,17 @@ def seed_everything(seed):
 
 
 def write_json(path, value):
-    with Path(path).open('w', encoding='utf-8') as stream:
-        json.dump(value, stream, indent=2, ensure_ascii=False, default=str, allow_nan=False)
+    path = Path(path)
+    fd, temporary = tempfile.mkstemp(prefix=path.name + '.', suffix='.tmp', dir=str(path.parent))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            json.dump(value, stream, indent=2, ensure_ascii=False, default=str, allow_nan=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
 
 
 def load_checkpoint(path, device):
@@ -111,12 +131,48 @@ def load_checkpoint(path, device):
     return torch.load(path, **options)
 
 
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, text):
+        for stream in self.streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self):
+        for stream in self.streams:
+            stream.flush()
+
+
 def run_one(data, args, family, variant, device, graph, aggregation, run_dir=None):
-    seed_everything(args.seed)
+    if args.delete_checkpoint_after_test and args.validation_only:
+        raise ValueError('Deleting checkpoints requires test evaluation')
     stamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')
     run_dir = (Path(run_dir) if run_dir is not None else
                args.output_root / args.dataset / (family + '_' + variant) / (stamp + '_seed' + str(args.seed)))
     run_dir.mkdir(parents=True, exist_ok=False)
+    with (run_dir / 'training.txt').open('w', encoding='utf-8', buffering=1) as log:
+        with redirect_stdout(Tee(sys.stdout, log)), redirect_stderr(Tee(sys.stderr, log)):
+            try:
+                result = _run_one(data, args, family, variant, device, graph, aggregation, run_dir)
+                # Persist both machine-readable results and the full human-readable transcript
+                # before removing the only checkpoint. Any earlier failure retains best.pt.
+                log.flush()
+                os.fsync(log.fileno())
+                if args.delete_checkpoint_after_test:
+                    (run_dir / 'best.pt').unlink()
+                    print('CHECKPOINT_DELETED best.pt; test results saved in result.json and training.txt', flush=True)
+                    log.flush()
+                    os.fsync(log.fileno())
+                return result
+            except Exception:
+                traceback.print_exc()
+                raise
+
+
+def _run_one(data, args, family, variant, device, graph, aggregation, run_dir):
+    seed_everything(args.seed)
     smoke = bool(args.max_steps or args.eval_users)
     model = build_model(data, args, family, variant, device, graph, aggregation)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -135,6 +191,7 @@ def run_one(data, args, family, variant, device, graph, aggregation, run_dir=Non
                     adapter_sha256={str(p.relative_to(ROOT)): file_hash(p)
                                     for p in [Path(__file__).resolve()] + sorted((ROOT / 'cf').glob('*.py'))})
     write_json(run_dir / 'config.json', metadata)
+    print('CONFIG ' + json.dumps(metadata, default=str, allow_nan=False), flush=True)
     print('\n{} / {} | {} parameters | {}'.format(family, variant, metadata['parameters'], run_dir), flush=True)
     best, best_epoch, stale = -float('inf'), 0, 0
     start_time = time.perf_counter()
@@ -159,7 +216,7 @@ def run_one(data, args, family, variant, device, graph, aggregation, run_dir=Non
             optimizer.step()
             totals += [float(x.detach()) for x in losses]
             steps += 1
-            if steps % args.log_every == 0:
+            if args.log_every and steps % args.log_every == 0:
                 print('epoch {} step {} loss {:.6f}'.format(epoch, steps, totals[0] / steps), flush=True)
         record = dict(epoch=epoch, steps=steps, losses=(totals / steps).tolist(),
                       train_seconds=time.perf_counter() - epoch_start)
@@ -180,13 +237,20 @@ def run_one(data, args, family, variant, device, graph, aggregation, run_dir=Non
             break
     checkpoint = load_checkpoint(run_dir / 'best.pt', device)
     model.load_state_dict(checkpoint['state_dict'], strict=True)
+    test = None
+    if not args.validation_only:
+        print('TEST_START best_epoch={} split=test'.format(checkpoint['epoch']), flush=True)
+        test = evaluate(model, data, 'test', args.top_k, args.eval_batch_size, args.eval_users)
+        print('TEST ' + json.dumps(test, allow_nan=False), flush=True)
     # Test is never used for checkpoint selection. It is evaluated only after selection.
     result = dict(model=family, variant=variant, dataset=args.dataset, seed=args.seed,
                   smoke_test=smoke, best_epoch=best_epoch, parameters=metadata['parameters'],
                   valid=checkpoint['valid'],
-                  test=None if args.validation_only else evaluate(
-                      model, data, 'test', args.top_k, args.eval_batch_size, args.eval_users),
+                  test=test,
                   validation_only=args.validation_only,
+                  checkpoint_retention='delete_after_test' if args.delete_checkpoint_after_test else 'keep',
+                  checkpoint_sha256=file_hash(run_dir / 'best.pt'), data_sha256=data.stats['sha256'],
+                  training_log='training.txt',
                   elapsed_seconds=time.perf_counter() - start_time, run_dir=str(run_dir))
     write_json(run_dir / 'result.json', result)
     print('RESULT ' + json.dumps(result, allow_nan=False), flush=True)

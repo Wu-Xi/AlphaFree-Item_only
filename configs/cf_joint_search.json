@@ -23,7 +23,7 @@
     },
     "fism": {
       "fixed": {"l2": 0.0, "weight-decay": 0.0, "fism-negatives": 4, "fism-user-bias": 1,
-                "fism-alpha": 0.5, "fism-reg": 0.001},
+                "fism-alpha": 0.5, "fism-reg": 0.000001},
       "grid": {}
     }
   },

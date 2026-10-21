@@ -2,6 +2,8 @@
 
 这是本地实验变体，不是作者官方模型。原版仍使用 `--model_name AlphaFree`（默认）。
 新模型使用 `--model_name AlphaFree2`，代码在 `models/AlphaFree2.py`。
+当前正式方案与四卡命令见 [ALPHA_EXPERIMENTS.md](ALPHA_EXPERIMENTS.md)：
+1 个原版 mean + 28 个变体，Baby/Steam 共 58 次，不再重复训练 AlphaFree2 mean。
 
 ## 修改范围
 
@@ -9,7 +11,7 @@
 
 AlphaFree2：`U = mlp_origin(B X)`。
 
-- R 是从 `train_user_list` 重建的二值交互矩阵，不从已归一化的预处理缓存反推。
+- R 是从 `train_user_list` 重建的交互计数矩阵，保留重复次数，不从已归一化的预处理缓存反推。
 - X 仍是固定的原始语义向量；没有添加可学习 item ID 表、用户向量表或 GNN。
 - 保留先聚合语义、再经过 MLP 的顺序，不改成聚合最终 item embedding。
 - 原始物品分支 `mlp_origin(X)` 保持不变。
@@ -78,7 +80,7 @@ python -u search_alphafree2.py --dataset amazon_movie --cuda 0 --output weights/
 nohup python -u search_alphafree2.py --dataset amazon_movie --cuda 0 --output weights/alphafree2_movie_v1 --execute > alphafree2_movie_search.log 2>&1 &
 ```
 
-每个数据集、每个 seed 29 次独立初始化的训练，包括 mean 对照。
+每个数据集、每个 seed 29 次独立初始化的训练：mean 对照使用原版 AlphaFree，其余 28 次使用 AlphaFree2。
 默认固定各数据集 YAML 的 K_c/lambda_align/tau_a/tau_r 和原版其他默认值；
 **这次只是 29-B 搜索，不是 AlphaFree 模型超参数 × 29-B 的完整联合网格。**
 默认 seed=2025；支持覆盖 `--seed`、`--max-epoch`、`--batch-size`、`--lr`、`--num-workers`。
@@ -108,8 +110,8 @@ weights/<dataset>/AlphaFree2/<时间戳、唯一运行标识及参数>/
 
 代码、数据/缓存、配置或 Python/PyTorch 版本变化时，manifest 会拒绝混用，需换新目录。
 数据指纹只保证当前实验中数据不变，并不能证明下载缓存使用的 K_c；需使用匹配的官方配置和缓存。
-同一输出目录只允许一个 worker；不同数据集可用不同 GPU/输出目录运行。
-异常断电可能留下 running.lock；先核实没有对应活跃进程，再手工处理具体锁文件。
+同一输出目录支持 `--num-shards` / `--shard-index` 多 worker，先用 `--prepare` 冻结同一清单。
+异常断电可能留下分片锁或任务锁；先核实没有对应活跃进程，再手工处理具体锁文件。
 不要同时重复启动上述前台和后台命令。
 
 与原始 AlphaFree 比较时，需对齐 seed、训练/评估协议和其他超参数；
@@ -129,3 +131,7 @@ python -m unittest discover -s tests -p 'test_alphafree2.py' -v
 - 真实 Movie 数据：重建 mean 与下载缓存最大差值 0；29 个 B 与现有 CF 矩阵最大差值 0。
 - 本机没有可用 CUDA，未验证完整 GPU 训练、编译评估器或真实 29 次训练调度。
   CUDA 模型测试在有 GPU 的环境中才运行。
+
+更新：本地 Baby 和 Steam 的计数 mean 与原版缓存均通过一致性检查；
+新增四 worker 并发调度模拟与验证集选参后的独立最终测试入口。
+旧搜索输出不兼容当前清单版本，必须使用新目录。

@@ -121,7 +121,7 @@ class FISMTests(unittest.TestCase):
             self.assertEqual(len({j['B'] for j in jobs if j['variant'] == 'item-only'}), 29)
             for job in jobs:
                 self.assertEqual(job['params']['fism-alpha'], .5)
-                self.assertEqual(job['params']['fism-reg'], .001)
+                self.assertEqual(job['params']['fism-reg'], 1e-6)
             native = build_jobs(spec, ['steam'], ['fism'], 'native', [2025])
             self.assertEqual(len(native), 1)
             self.assertEqual(native[0]['variant'], 'original')

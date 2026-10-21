@@ -1,4 +1,4 @@
-"""Original AlphaFree trainer with isolated AlphaFree2 outputs and valid-only tuning."""
+"""Shared AlphaFree/AlphaFree2 validation-only trainer; model/loss unchanged."""
 import json
 import os
 import time
@@ -43,7 +43,8 @@ class AlphaFree2RS(AlphaFreeRS):
 
     def execute(self):
         super().execute()
-        result = dict(model='AlphaFree2', dataset=self.args.dataset, seed=self.args.seed,
+        result = dict(model=self.args.model_name, dataset=self.args.dataset, seed=self.args.seed,
+                      aggregation_protocol='count-weighted train history; original user branch only',
                       aggregation_scope='original-user-only', b_mode=self.args.b_mode,
                       b_a=self.args.b_a, b_b=self.args.b_b,
                       validation_only=self.args.validation_only,

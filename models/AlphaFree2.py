@@ -12,4 +12,4 @@ class AlphaFree2(AlphaFree):
         super().__init__(args, data)
         self.user_interact_matrix = build_user_aggregation(
             data.train_user_list, data.n_users, data.n_items,
-            args.b_mode, args.b_a, args.b_b)
+            args.b_mode, args.b_a, args.b_b, preserve_counts=True)

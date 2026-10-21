@@ -23,8 +23,10 @@ search, GPU server launch commands, sharding, and validation-only selection.
 aggregation with configurable train-only B, preserving fixed language features,
 MLPs, augmented branches and losses. The default `--b-mode mean` is the original
 control. See [ALPHAFREE2.md](ALPHAFREE2.md) for the 29-setting grid and GPU commands.
-`python search_alphafree2.py --dataset amazon_movie` previews all 29 commands;
-add `--execute` for sequential validation-only training on a configured GPU server.
+`python search_alphafree2.py --dataset amazon_movie` previews one original AlphaFree
+mean control plus 28 AlphaFree2 variants, all using validation-only training.
+Counted interactions are preserved. For the Baby/Steam four-GPU launcher and
+validation-selected final testing, see [ALPHA_EXPERIMENTS.md](ALPHA_EXPERIMENTS.md).
 
 ## Local AlphaFree3 frozen-checkpoint experiment
 

@@ -76,7 +76,7 @@ def build_parser():
     parser.add_argument('--b-a', '--b_a', dest='b_a', type=float, default=.5)
     parser.add_argument('--b-b', '--b_b', dest='b_b', type=float, default=.5)
     parser.add_argument('--validation-only', dest='validation_only', action='store_true',
-                        help='AlphaFree2: evaluate/select on validation only; do not export test recommendations')
+                        help='AlphaFree/AlphaFree2: shared validation-only training; no test recommendations')
 
     return parser
 
@@ -114,7 +114,9 @@ def parse_args(argv=None):
 
     # 4) final parse (CLI가 config 덮어씀)
     args = parser.parse_args(argv)
-    if args.model_name == 'AlphaFree2':
+    if args.model_name == 'AlphaFree2' or args.validation_only:
+        if args.model_name not in ('AlphaFree', 'AlphaFree2'):
+            parser.error('validation-only training supports AlphaFree and AlphaFree2')
         if args.phase != 'train' or args.test_only:
             parser.error('AlphaFree2 currently supports fresh training only; author pretrained weights are not AlphaFree2 weights')
         if args.infonce != 1 or args.neg_sample < 1:
@@ -129,8 +131,6 @@ def parse_args(argv=None):
             parser.error('AlphaFree2 needs an integer evaluation interval and at least one evaluation')
         if min(args.batch_size, args.hidden_size, args.patience, args.Ks, args.max2keep) < 1 or args.num_workers < 0:
             parser.error('Invalid AlphaFree2 training sizes')
-    elif args.validation_only:
-        parser.error('--validation-only is supported by AlphaFree2 only in this entry point')
 
     # special args(옵션 목록) 필요하면 그대로 유지 가능
     special_args = sorted(list(filtered.keys()))
