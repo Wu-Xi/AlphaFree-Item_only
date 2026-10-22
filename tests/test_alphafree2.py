@@ -29,6 +29,9 @@ class AlphaFree2Tests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self.checkpoint_patch = patch.object(search, 'CHECKPOINT_ROOT', self.root / 'weights')
+        self.checkpoint_patch.start()
+        self.addCleanup(self.checkpoint_patch.stop)
         directory = self.root / 'data/amazon_movie/cf_data'
         directory.mkdir(parents=True)
         for name, content in dict(train='0 0 1 0\n1 1 2 3\n2 1 1\n3\n',
@@ -51,6 +54,16 @@ class AlphaFree2Tests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def fake_final_result(self, args, recall=.1):
+        checkpoint = search.CHECKPOINT_ROOT / args.dataset / args.model_name / args.saveID / 'epoch=4.checkpoint.pth.tar'
+        checkpoint.parent.mkdir(parents=True)
+        checkpoint.touch()
+        return dict(model=args.model_name, dataset=args.dataset, seed=args.seed,
+                    validation_only=True, b_mode=args.b_mode, b_a=args.b_a, b_b=args.b_b,
+                    best_valid_recall=recall, best_epoch=4, checkpoint=str(checkpoint),
+                    final_test=True, test_k=20,
+                    test_metrics=dict(recall=.05, hit_ratio=.1, precision=.01, ndcg=.02, mrr=.03, map=.02))
 
     def test_all_29_matrices_match_existing_CF_and_no_leakage(self):
         grid = aggregation_grid()
@@ -140,11 +153,7 @@ class AlphaFree2Tests(unittest.TestCase):
                 '--max-runs', '1']
         def fake_train(command, **kwargs):
             args, _ = parse_args(command[3:])
-            checkpoint = self.root / (args.saveID + '.pt')
-            checkpoint.touch()
-            result = dict(model=args.model_name, dataset=args.dataset, seed=args.seed,
-                          validation_only=True, b_mode=args.b_mode, b_a=args.b_a, b_b=args.b_b,
-                          best_valid_recall=.1, checkpoint=str(checkpoint))
+            result = self.fake_final_result(args)
             kwargs['stdout'].write('ALPHAFREE2_RESULT ' + json.dumps(result) + '\n')
             return types.SimpleNamespace(returncode=0)
         with redirect_stdout(io.StringIO()), patch('torch.cuda.is_available', return_value=True), \
@@ -203,16 +212,12 @@ class AlphaFree2Tests(unittest.TestCase):
         root = self.root / 'parallel'
         base = ['--data-root', str(self.root / 'data'), '--output', str(root), '--num-shards', '4']
         seen = []
-        with patch.object(torch.Tensor, 'cuda', lambda tensor, *a, **k: tensor):
-            state = AlphaFree(self.args, self.data).state_dict()
         def fake_train(command, **kwargs):
             args, _ = parse_args(command[3:])
             seen.append((args.model_name, args.b_mode, args.b_a, args.b_b))
-            checkpoint = self.root / (args.saveID + '.pt')
-            torch.save({'state_dict': state}, checkpoint)
-            result = dict(model=args.model_name, dataset=args.dataset, seed=args.seed,
-                          validation_only=True, b_mode=args.b_mode, b_a=args.b_a, b_b=args.b_b,
-                          best_valid_recall=.9 if args.b_mode == 'sym' else .1, checkpoint=str(checkpoint))
+            result = self.fake_final_result(args, recall=.9 if args.b_mode == 'sym' else .1)
+            # Test score winner deliberately differs from validation winner.
+            result['test_metrics']['recall'] = .99 if args.b_mode == 'sum' else .05
             kwargs['stdout'].write('ALPHAFREE2_RESULT ' + json.dumps(result) + '\n')
             return types.SimpleNamespace(returncode=0)
         with redirect_stdout(io.StringIO()), patch('torch.cuda.is_available', return_value=True), \
@@ -231,13 +236,15 @@ class AlphaFree2Tests(unittest.TestCase):
         self.assertTrue(report['complete'])
         selected = final_eval.select_runs(root)
         self.assertEqual([r['job']['setting']['id'] for r in selected['selected']], ['mean', 'sym'])
-        with redirect_stdout(io.StringIO()):
+        self.assertFalse(list(search.CHECKPOINT_ROOT.rglob('*.pth.tar')))
+        with redirect_stdout(io.StringIO()), patch.object(final_eval, 'evaluate', side_effect=AssertionError('already tested')):
             report = final_eval.main(['--search-root', str(root), '--device', 'cpu', '--execute'])
         self.assertEqual(len(report['results']), 2)
         with redirect_stdout(io.StringIO()), patch.object(final_eval, 'evaluate', side_effect=AssertionError('must resume')):
             final_eval.main(['--search-root', str(root), '--device', 'cpu', '--execute'])
-        Path(selected['selected'][0]['result']['checkpoint']).write_bytes(b'corrupted')
-        with self.assertRaisesRegex(ValueError, 'Checkpoint changed'):
+        status = search.read_json(root / (selected['selected'][0]['job']['id'] + '.json'))
+        Path(status['log']).write_text('corrupted')
+        with self.assertRaisesRegex(ValueError, 'TXT changed'):
             final_eval.select_runs(root)
 
     def test_four_workers_actually_overlap_without_duplicate_jobs(self):
@@ -251,11 +258,7 @@ class AlphaFree2Tests(unittest.TestCase):
             args, _ = parse_args(command[3:])
             seen.append(args.saveID)
             barrier.wait(timeout=15)  # All four workers must reach training together.
-            checkpoint = self.root / (args.saveID + '.pt')
-            checkpoint.touch()
-            result = dict(model=args.model_name, dataset=args.dataset, seed=args.seed,
-                          validation_only=True, b_mode=args.b_mode, b_a=args.b_a, b_b=args.b_b,
-                          best_valid_recall=.1, checkpoint=str(checkpoint))
+            result = self.fake_final_result(args)
             kwargs['stdout'].write('ALPHAFREE2_RESULT ' + json.dumps(result) + '\n')
             return types.SimpleNamespace(returncode=0)
         with redirect_stdout(io.StringIO()), patch('torch.cuda.is_available', return_value=True), \
@@ -291,7 +294,7 @@ class AlphaFree2Tests(unittest.TestCase):
         with redirect_stdout(io.StringIO()), patch.object(search.subprocess, 'run', return_value=types.SimpleNamespace(returncode=2)):
             with self.assertRaisesRegex(RuntimeError, 'exit code'):
                 search.execute_job(options, job)
-        self.assertEqual(len(list(options.output.glob('*.log'))), 2)
+        self.assertEqual(len(list(options.output.glob('*.txt'))), 2)
         self.assertFalse(lock.exists())
 
     def test_final_frozen_scores_match_training_models_with_repeats(self):
@@ -309,6 +312,137 @@ class AlphaFree2Tests(unittest.TestCase):
             row = dict(job={'parameters': params}, result={'checkpoint': str(checkpoint)})
             model = build_frozen_model(row, self.cf, 'cpu', 2)
             np.testing.assert_allclose(model.score_all([0, 1, 2, 3]).numpy(), expected, atol=1e-6)
+
+    def test_final_test_and_log_must_succeed_before_checkpoint_cleanup(self):
+        options = search.parse_args(['--output', str(self.root / 'cleanup')])
+        options.output.mkdir()
+        job = search.build_jobs(options)[0]
+        produced = []
+        def fake_train(command, **kwargs):
+            args, _ = parse_args(command[3:])
+            result = self.fake_final_result(args)
+            produced.append(result)
+            kwargs['stdout'].write('epoch=4 loss=1\nvalid:recall=.1\nFinal test@20\ntest:' +
+                                   json.dumps(result['test_metrics']) + '\n')
+            kwargs['stdout'].write('ALPHAFREE2_RESULT ' + json.dumps(result) + '\n')
+            return types.SimpleNamespace(returncode=0)
+        # Failure to commit completed status must retain the checkpoint.
+        original_write = search.write_json
+        def fail_complete(path, value):
+            if value.get('state') == 'completed':
+                raise OSError('disk full')
+            return original_write(path, value)
+        with redirect_stdout(io.StringIO()), patch.object(search.subprocess, 'run', side_effect=fake_train), \
+                patch.object(search, 'write_json', side_effect=fail_complete):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                search.execute_job(options, job)
+        self.assertTrue(Path(produced[-1]['checkpoint']).is_file())
+        options.retry_failed = True
+        with redirect_stdout(io.StringIO()), patch.object(search.subprocess, 'run', side_effect=fake_train):
+            search.execute_job(options, job)
+        self.assertFalse(Path(produced[-1]['checkpoint']).exists())
+        # Failed attempt's checkpoint is intentionally not swept up.
+        self.assertTrue(Path(produced[0]['checkpoint']).exists())
+        status = search.read_json(options.output / (job['id'] + '.json'))
+        self.assertEqual(status['checkpoint_cleanup'], 'deleted')
+        text = Path(status['log']).read_text()
+        self.assertIn('epoch=4 loss=1', text)
+        self.assertIn('Final test@20', text)
+        self.assertIn('test:', text)
+        self.assertEqual(Path(status['log']).suffix, '.txt')
+
+    def test_cleanup_crash_resume_keep_and_unsafe_target(self):
+        options = search.parse_args(['--output', str(self.root / 'pending')])
+        options.output.mkdir()
+        jobs = search.build_jobs(options)
+        def fake_train(command, **kwargs):
+            args, _ = parse_args(command[3:])
+            result = self.fake_final_result(args)
+            kwargs['stdout'].write('ALPHAFREE2_RESULT ' + json.dumps(result) + '\n')
+            return types.SimpleNamespace(returncode=0)
+        with redirect_stdout(io.StringIO()), patch.object(search.subprocess, 'run', side_effect=fake_train), \
+                patch.object(search, 'finish_checkpoint_cleanup', side_effect=OSError('unlink failed')):
+            with self.assertRaisesRegex(OSError, 'unlink failed'):
+                search.execute_job(options, jobs[0])
+        path = options.output / (jobs[0]['id'] + '.json')
+        status = search.read_json(path)
+        self.assertEqual(status['state'], 'completed')
+        self.assertEqual(status['checkpoint_cleanup'], 'pending')
+        checkpoint = Path(status['result']['checkpoint'])
+        self.assertTrue(checkpoint.exists())
+        # Guard rejects a path outside this run's model directory without deleting it.
+        bad = copy.deepcopy(status)
+        outside = self.root / 'user_file.pth.tar'
+        outside.write_bytes(checkpoint.read_bytes())
+        bad['result']['checkpoint'] = str(outside)
+        search.write_json(path, bad)
+        with self.assertRaisesRegex(ValueError, 'Unsafe checkpoint'):
+            search.finish_checkpoint_cleanup(options.output, jobs[0])
+        self.assertTrue(outside.exists())
+        search.write_json(path, status)
+        # Simulate interruption between unlink and status update; never retrain/retest.
+        checkpoint.unlink()
+        with redirect_stdout(io.StringIO()), patch.object(search.subprocess, 'run', side_effect=AssertionError('no retrain')):
+            self.assertFalse(search.execute_job(options, jobs[0]))
+        self.assertEqual(search.read_json(path)['checkpoint_cleanup'], 'deleted')
+        options.keep_checkpoints = True
+        with redirect_stdout(io.StringIO()), patch.object(search.subprocess, 'run', side_effect=fake_train):
+            search.execute_job(options, jobs[1])
+        kept = search.read_json(options.output / (jobs[1]['id'] + '.json'))
+        self.assertEqual(kept['checkpoint_cleanup'], 'kept')
+        self.assertTrue(Path(kept['result']['checkpoint']).is_file())
+
+    def test_missing_test_result_keeps_checkpoint_and_marks_failed(self):
+        options = search.parse_args(['--output', str(self.root / 'no_test')])
+        options.output.mkdir()
+        job = search.build_jobs(options)[0]
+        produced = []
+        def fake_train(command, **kwargs):
+            args, _ = parse_args(command[3:])
+            result = self.fake_final_result(args)
+            produced.append(result)
+            result['test_metrics'] = None
+            kwargs['stdout'].write('ALPHAFREE2_RESULT ' + json.dumps(result) + '\n')
+            return types.SimpleNamespace(returncode=0)
+        with redirect_stdout(io.StringIO()), patch.object(search.subprocess, 'run', side_effect=fake_train):
+            with self.assertRaisesRegex(ValueError, 'final test'):
+                search.execute_job(options, job)
+        self.assertTrue(Path(produced[0]['checkpoint']).exists())
+        self.assertEqual(search.read_json(options.output / (job['id'] + '.json'))['state'], 'failed')
+
+    def test_trainer_tests_restored_best_once_and_logs_before_result(self):
+        source = (search.ROOT / 'models/base/AlphaFree2RS.py').read_text(encoding='utf-8')
+        definition = next(node for node in ast.parse(source).body if isinstance(node, ast.ClassDef))
+        calls = []
+        class Parent:
+            def execute(self):
+                self.model = 'restored_validation_best'
+                calls.append('restore')
+            def get_evaluators(self, data):
+                return ['valid_eval', 'test_eval'], ['valid', 'test']
+        def evaluate(args, data, model, epoch, base, evaluator, name):
+            calls.append(name)
+            self.assertEqual((model, epoch, evaluator), ('restored_validation_best', 4, 'test_eval'))
+            with (Path(base) / 'stats.txt').open('a') as stream:
+                stream.write('test:recall=.1\n')
+            return False, False, {'recall': np.float32(.1)}
+        namespace = dict(AlphaFreeRS=Parent, time=time, math=math, json=json,
+                         os=__import__('os'), Path=Path, evaluation=evaluate)
+        exec(compile(ast.Module(body=[definition], type_ignores=[]), '<final test>', 'exec'), namespace)
+        trainer = namespace['AlphaFree2RS']()
+        trainer.args = copy.copy(self.args)
+        trainer.args.validation_only = trainer.args.final_test = True
+        trainer.data = types.SimpleNamespace(best_valid_epoch=4, best_valid_recall=.2)
+        trainer.base_path = str(self.root)
+        (self.root / 'stats.txt').write_text('epoch=0 loss=1\nvalid:recall=.2\n')
+        with redirect_stdout(io.StringIO()) as output:
+            trainer.execute()
+        self.assertEqual(calls, ['restore', 'test'])
+        self.assertIn('ALPHAFREE2_RESULT', output.getvalue())
+        text = (self.root / 'stats.txt').read_text()
+        self.assertLess(text.index('epoch=0'), text.index('Final test@20'))
+        self.assertIn('test:recall=.1', text)
+        self.assertTrue(search.read_json(self.root / 'result.json')['final_test'])
 
     def test_trainer_valid_only_control_without_compiled_dependencies(self):
         # Exercise the real subclass methods against a tiny fake parent; not an end-to-end trainer test.

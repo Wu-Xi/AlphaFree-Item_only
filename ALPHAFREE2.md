@@ -88,23 +88,26 @@ nohup python -u search_alphafree2.py --dataset amazon_movie --cuda 0 --output we
 修改这些训练参数应使用新输出目录。显存不足时可降低 batch-size，但须对全部 B 及 mean 对照保持一致。
 batch-size 也改变对齐损失的批内对比条件，不仅影响显存。
 
-搜索强制 validation-only，不计算测试指标、不导出测试推荐列表。
+搜索强制训练期间 validation-only；每组训练结束后加载验证集最优权重测试一次，不导出测试推荐列表。
+训练和最终测试输出统一保存在 `.attemptN.txt`；确认结果保存成功后默认删除最佳 checkpoint。
+单独使用上方 main.py 诊断命令时，可加 `--final-test` 启用最终测试，但自动删除由搜索调度器负责。
 AlphaFree2 保留原优化器/训练循环和文本日志，但不调用原版要求 valid/test 双曲线的训练结束绘图函数。
-test.txt 仍因原版候选屏蔽协议被读取；“不计算测试指标”不是“不读取 test.txt”。
+test.txt 仍因原版候选屏蔽协议在训练初始化时被读取，训练中不计算测试指标。
 搜索不自动下载、生成语义特征或构造增强缓存；执行前检查所需缓存完整性。
 
 ## 输出、续跑和选参
 
 搜索目录保存 manifest.json、每个 B 的状态 JSON、每次尝试的独立日志和 summary.json。
 summary.json 按最佳验证 Recall@20 排名；未完成全部 29 项时 best 只是暂定。
-checkpoint、args.txt、stats.txt、result.json 保存在：
+args.txt、包含最终测试的 stats.txt、result.json 保存在模型目录；checkpoint 仅在训练/测试期间保留：
 
 ```text
-weights/<dataset>/AlphaFree2/<时间戳、唯一运行标识及参数>/
+weights/<dataset>/<AlphaFree或AlphaFree2>/<时间戳、唯一运行标识及参数>/
 ```
 
 搜索目录的状态和 summary 会记录 checkpoint 的绝对路径。
-只有训练正常结束、结果元信息匹配且 checkpoint 存在才会跳过该任务。
+训练和最终测试正常结束、结果元信息与 TXT 哈希匹配时跳过该任务，不要求已删除的 checkpoint 存在。
+默认删除权重后不可再次推理；如需保留，搜索入口加 `--keep-checkpoints` 并使用独立输出目录。
 这不是优化器/epoch 级续训，失败重试会从头训练并保留旧日志。
 失败后先检查日志，确认问题解决，再在原命令加入 `--retry-failed`。
 
@@ -133,5 +136,5 @@ python -m unittest discover -s tests -p 'test_alphafree2.py' -v
   CUDA 模型测试在有 GPU 的环境中才运行。
 
 更新：本地 Baby 和 Steam 的计数 mean 与原版缓存均通过一致性检查；
-新增四 worker 并发调度模拟与验证集选参后的独立最终测试入口。
+新增四 worker 并发调度模拟、每组最终测试/权重清理，以及按验证集选参后导出已记录测试指标的入口。
 旧搜索输出不兼容当前清单版本，必须使用新目录。

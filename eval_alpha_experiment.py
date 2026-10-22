@@ -1,4 +1,4 @@
-"""Test only the original and validation-selected variant from a completed Alpha search."""
+"""Export recorded final tests (v3), or run legacy deferred tests (v2), by validation selection."""
 import argparse
 import json
 from pathlib import Path
@@ -17,8 +17,8 @@ from search_alphafree2 import ROOT, exclusive_lock, file_hash, read_json, summar
 def select_runs(root):
     manifest_path = root / 'manifest.json'
     manifest = read_json(manifest_path)
-    if manifest.get('version') != 2:
-        raise ValueError('Expected original + 28 search manifest version 2')
+    if manifest.get('version') not in (2, 3):
+        raise ValueError('Expected original + 28 search manifest version 2 or 3')
     # Fail closed if data, training code, or inference code changed since the search.
     for relative, expected in manifest['source_sha256'].items():
         if file_hash(ROOT / relative) != expected:
@@ -40,9 +40,10 @@ def select_runs(root):
             job = next(j for j in manifest['jobs'] if j['id'] == row['id'])
             status = read_json(root / (job['id'] + '.json'))
             checkpoint = row['result']['checkpoint']
-            actual = file_hash(checkpoint)
-            if status.get('checkpoint_sha256') != actual:
-                raise ValueError('Checkpoint changed or missing fingerprint: ' + checkpoint)
+            actual = status.get('checkpoint_sha256')
+            if manifest['version'] == 2 or status.get('checkpoint_cleanup') == 'kept':
+                if file_hash(checkpoint) != actual:
+                    raise ValueError('Checkpoint changed or missing fingerprint: ' + checkpoint)
             selected.append(dict(role=role, job=job, result=row['result'], checkpoint_sha256=actual))
     return dict(search_manifest_sha256=file_hash(manifest_path), selected=selected,
                 selection='Original plus best of 28 variants by validation Recall@20, per dataset')
@@ -85,7 +86,8 @@ def main(argv=None):
     if not args.execute:
         print(json.dumps(selection, ensure_ascii=False, indent=2))
         return selection
-    device = torch.device(args.device)
+    recorded = all(row['result'].get('final_test') for row in selection['selected'])
+    device = torch.device('cpu' if recorded else args.device)
     if device.type not in ('cpu', 'cuda') or (device.type == 'cuda' and not torch.cuda.is_available()):
         raise ValueError('A usable CPU/CUDA device is required')
     torch.set_num_threads(args.threads)
@@ -94,11 +96,13 @@ def main(argv=None):
     with exclusive_lock(output / 'running.lock'):
         frozen = dict(selection=selection, device=str(device), torch=str(torch.__version__),
                       eval_batch_size=args.eval_batch_size, encode_batch_size=args.encode_batch_size,
-                      threads=args.threads, split='test', protocol='unique-item truth; AlphaFree C++ masks')
+                      threads=args.threads, split='test',
+                      protocol='recorded per-run AlphaFree C++ tests' if recorded else 'unique-item truth; AlphaFree C++ masks')
         path = output / 'selection.json'
         if path.exists() and read_json(path) != frozen:
             raise ValueError('Final test selection/runtime changed; use a NEW output directory')
-        # Freeze BEFORE reading any test metrics.
+        # Version 3 exports already-recorded tests; selection still uses validation only.
+        # Legacy version 2 freezes selection before running its deferred tests.
         if not path.exists():
             write_json(path, frozen)
         results = []
@@ -110,12 +114,15 @@ def main(argv=None):
                 if result['selected'] != row:
                     raise ValueError('Saved test result does not match locked selection')
             else:
-                data = CFData(Path(params['data_path']) / params['dataset'] / 'cf_data', duplicate_items='count')
-                model = build_frozen_model(row, data, device, args.encode_batch_size)
-                metrics = evaluate(model, data, split='test', k=20, batch_size=args.eval_batch_size)
+                if recorded:
+                    metrics = row['result']['test_metrics']
+                else:
+                    data = CFData(Path(params['data_path']) / params['dataset'] / 'cf_data', duplicate_items='count')
+                    model = build_frozen_model(row, data, device, args.encode_batch_size)
+                    metrics = evaluate(model, data, split='test', k=20, batch_size=args.eval_batch_size)
+                    del model, data
                 result = dict(selected=row, metrics=metrics, split='test')
                 write_json(result_path, result)
-                del model, data
                 if device.type == 'cuda':
                     torch.cuda.empty_cache()
             results.append(result)

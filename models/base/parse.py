@@ -77,6 +77,8 @@ def build_parser():
     parser.add_argument('--b-b', '--b_b', dest='b_b', type=float, default=.5)
     parser.add_argument('--validation-only', dest='validation_only', action='store_true',
                         help='AlphaFree/AlphaFree2: shared validation-only training; no test recommendations')
+    parser.add_argument('--final-test', action='store_true',
+                        help='With validation-only training, evaluate best checkpoint on test once at the end')
 
     return parser
 
@@ -114,6 +116,8 @@ def parse_args(argv=None):
 
     # 4) final parse (CLI가 config 덮어씀)
     args = parser.parse_args(argv)
+    if args.final_test and not args.validation_only:
+        parser.error('--final-test requires --validation-only')
     if args.model_name == 'AlphaFree2' or args.validation_only:
         if args.model_name not in ('AlphaFree', 'AlphaFree2'):
             parser.error('validation-only training supports AlphaFree and AlphaFree2')

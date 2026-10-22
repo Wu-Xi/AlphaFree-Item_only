@@ -5,7 +5,6 @@ from .evaluator.proxy_evaluator import ProxyEvaluator
 from .util import DataIterator
 from .utils import *
 from .util.gdown import download_from_gdrive
-from tqdm import tqdm
 import torch.nn as nn
 import numpy as np
 import datetime
@@ -381,8 +380,7 @@ class AlphaFreeRS(AbstractRS):
     def train_one_epoch(self, epoch):
         running_loss, num_batches = 0, 0
 
-        pbar = tqdm(enumerate(self.data.train_loader), mininterval=2, total = len(self.data.train_loader))
-        for batch_i, batch in pbar:          
+        for batch_i, batch in enumerate(self.data.train_loader):
             batch = [x.cuda(self.device) for x in batch]
             users, pos_items, _, _, neg_items = batch[0], batch[1], batch[2], batch[3], batch[4]
             self.model.train()

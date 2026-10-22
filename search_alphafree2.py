@@ -16,6 +16,7 @@ from models.base.parse import parse_args as model_args
 from models.base.user_aggregation import aggregation_grid
 
 ROOT = Path(__file__).resolve().parent
+CHECKPOINT_ROOT = ROOT / 'weights'
 
 
 def read_json(path):
@@ -28,6 +29,8 @@ def write_json(path, value):
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as stream:
             json.dump(value, stream, indent=2, ensure_ascii=False, allow_nan=False)
+            stream.flush()
+            os.fsync(stream.fileno())
         os.replace(temporary, path)
     finally:
         if os.path.exists(temporary):
@@ -69,6 +72,8 @@ def parse_args(argv=None):
     parser.add_argument('--max-runs', type=int, default=0, help='0 means all remaining B settings')
     parser.add_argument('--execute', action='store_true')
     parser.add_argument('--retry-failed', action='store_true')
+    parser.add_argument('--keep-checkpoints', action='store_true',
+                        help='Opt out of deleting each checkpoint after its final test is safely saved')
     parser.add_argument('--prepare', action='store_true', help='Check caches and freeze plan, no training')
     parser.add_argument('--summarize', action='store_true', help='Read frozen plan and select by validation')
     parser.add_argument('--num-shards', type=int, default=1)
@@ -98,7 +103,8 @@ def build_jobs(options):
             model = 'AlphaFree' if setting['id'] == 'mean' else 'AlphaFree2'
             argv = ['--phase', 'train', '--model_name', model, '--dataset', dataset,
                     '--config_dir', str(ROOT / 'configs'), '--data_path', str(options.data_root) + os.sep,
-                    '--seed', str(options.seed), '--validation-only', '--saveID', 'B29_' + setting['id'],
+                    '--seed', str(options.seed), '--validation-only', '--final-test', '--max2keep', '1',
+                    '--saveID', 'B29_' + setting['id'],
                     '--b-mode', setting['mode'], '--b-a', str(setting['a']), '--b-b', str(setting['b'])]
             for key in ('max_epoch', 'batch_size', 'lr', 'num_workers'):
                 value = getattr(options, key)
@@ -178,17 +184,30 @@ def completed(root, job):
     if status.get('state') != 'completed':
         return None
     result = status['result']
-    validate_result(job, result)
+    cleanup = status.get('checkpoint_cleanup')
+    validate_result(job, result, allow_missing_checkpoint=cleanup in ('pending', 'deleted'))
+    if job['parameters'].get('final_test'):
+        if cleanup not in ('pending', 'deleted', 'kept'):
+            raise ValueError('Missing checkpoint cleanup state: ' + job['id'])
+        if file_hash(status['log']) != status.get('log_sha256'):
+            raise ValueError('Completed training/test TXT changed: ' + job['id'])
     return result
 
 
-def validate_result(job, result):
+def validate_result(job, result, allow_missing_checkpoint=False):
     args = job['parameters']
     if (not result['validation_only'] or result['model'] != args['model_name']
             or any(result[k] != args[k] for k in ('dataset', 'seed', 'b_mode', 'b_a', 'b_b'))
             or not math.isfinite(result['best_valid_recall'])
-            or not Path(result['checkpoint']).is_file()):
+            or (not allow_missing_checkpoint and not Path(result['checkpoint']).is_file())):
         raise ValueError('Invalid completed result: ' + job['id'])
+    if args.get('final_test'):
+        metrics = result.get('test_metrics')
+        required = {'recall', 'hit_ratio', 'precision', 'ndcg', 'mrr', 'map'}
+        if (result.get('final_test') is not True or result.get('test_k') != 20
+                or not isinstance(metrics, dict) or set(metrics) != required
+                or not all(math.isfinite(v) and 0 <= v <= 1 for v in metrics.values())):
+            raise ValueError('Missing/invalid final test@20 metrics: ' + job['id'])
 
 
 def summary(root, jobs):
@@ -217,7 +236,8 @@ def make_manifest(options, jobs):
         configs[dataset] = file_hash(ROOT / 'configs' / (dataset + '.yaml'))
     sources = [ROOT / 'main.py', Path(__file__).resolve(), ROOT / 'eval_alpha_experiment.py',
                ROOT / 'cf/data.py', ROOT / 'cf/evaluate.py'] + sorted((ROOT / 'models').rglob('*.py'))
-    return dict(version=2, protocol='original + 28 variants; counted train history; validation only',
+    return dict(version=3, protocol='validation selection; final test per job; TXT before checkpoint cleanup',
+                keep_checkpoints=options.keep_checkpoints,
                 jobs=jobs, data_sha256=fingerprints,
                 source_sha256={str(p.relative_to(ROOT)): file_hash(p) for p in sources},
                 config_sha256=configs, python=sys.version.split()[0], torch=str(torch.__version__))
@@ -241,17 +261,48 @@ def save_report(root, jobs, filename):
     return report
 
 
+def finish_checkpoint_cleanup(root, job):
+    """Called under the job lock, only AFTER durable test/log/completed status.
+
+    Delete one exact validation-best checkpoint, never a directory or glob.
+    A crash after unlink is recoverable from the persisted pending state.
+    """
+    status_path = root / (job['id'] + '.json')
+    status = read_json(status_path)
+    if status.get('checkpoint_cleanup') != 'pending':
+        return
+    if completed(root, job) is None:
+        raise ValueError('Cannot clean an incomplete run')
+    result = status['result']
+    path = Path(result['checkpoint'])
+    expected_parent = (CHECKPOINT_ROOT / job['parameters']['dataset'] /
+                       job['parameters']['model_name']).resolve()
+    resolved = path.resolve()
+    if (path.is_symlink() or resolved.parent.parent != expected_parent
+            or resolved.name != 'epoch={}.checkpoint.pth.tar'.format(result['best_epoch'])):
+        raise ValueError('Unsafe checkpoint cleanup target: ' + str(path))
+    if path.exists():
+        if file_hash(path) != status['checkpoint_sha256']:
+            raise ValueError('Checkpoint changed before cleanup: ' + str(path))
+        path.unlink()
+    status['checkpoint_cleanup'] = 'deleted'
+    write_json(status_path, status)
+    print('Checkpoint removed after saved final test: ' + str(path), flush=True)
+
+
 def execute_job(options, job):
     # Lock before reading/changing status; protects even overlapping shard plans.
     with exclusive_lock(options.output / (job['id'] + '.lock')):
         if completed(options.output, job) is not None:
+            finish_checkpoint_cleanup(options.output, job)
+            print('SKIP completed: ' + job['id'], flush=True)
             return False
         status_path = options.output / (job['id'] + '.json')
         old = read_json(status_path) if status_path.exists() else {}
         if old.get('state') in ('failed', 'running') and not options.retry_failed:
             raise RuntimeError('Failed/interrupted run; inspect log and use --retry-failed: ' + job['id'])
         attempt = int(old.get('attempt', 0)) + 1
-        log_path = options.output / (job['id'] + '.attempt' + str(attempt) + '.log')
+        log_path = options.output / (job['id'] + '.attempt' + str(attempt) + '.txt')
         status = dict(state='running', attempt=attempt, log=str(log_path), pid=os.getpid())
         write_json(status_path, status)
         run_args = list(job['argv'])
@@ -261,6 +312,8 @@ def execute_job(options, job):
         try:
             with log_path.open('x', encoding='utf-8') as log:
                 process = subprocess.run(command, cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT)
+                log.flush()
+                os.fsync(log.fileno())
             if process.returncode:
                 raise RuntimeError('Training exit code ' + str(process.returncode))
             result = None
@@ -271,12 +324,16 @@ def execute_job(options, job):
             if result is None:
                 raise RuntimeError('Training did not produce a completed result')
             validate_result(job, result)
-            status.update(state='completed', result=result, checkpoint_sha256=file_hash(result['checkpoint']))
+            status.update(state='completed', result=result, checkpoint_sha256=file_hash(result['checkpoint']),
+                          log_sha256=file_hash(log_path),
+                          checkpoint_cleanup='kept' if options.keep_checkpoints else 'pending')
             write_json(status_path, status)
         except Exception as error:
             status.update(state='failed', error=str(error))
             write_json(status_path, status)
             raise
+        # A cleanup failure must NOT invalidate the completed test or cause retraining.
+        finish_checkpoint_cleanup(options.output, job)
         return True
 
 
@@ -284,8 +341,8 @@ def main(argv=None):
     options = parse_args(argv)
     if options.summarize:
         manifest = read_json(options.output / 'manifest.json')
-        if manifest.get('version') != 2:
-            raise ValueError('Expected original + 28 manifest version 2')
+        if manifest.get('version') not in (2, 3):
+            raise ValueError('Expected original + 28 manifest version 2 or 3')
         report = save_report(options.output, manifest['jobs'], 'summary.json')
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return report
@@ -314,10 +371,7 @@ def main(argv=None):
     with exclusive_lock(options.output / ('shard_{}_of_{}.lock'.format(options.shard_index, options.num_shards))):
         attempts = 0
         for job in selected:
-            if completed(options.output, job) is not None:
-                print('SKIP completed: ' + job['id'], flush=True)
-                continue
-            if options.max_runs and attempts >= options.max_runs:
+            if options.max_runs and attempts >= options.max_runs and completed(options.output, job) is None:
                 break
             attempts += int(execute_job(options, job))
             save_report(options.output, jobs, 'summary_shard_{}_of_{}.json'.format(options.shard_index, options.num_shards))

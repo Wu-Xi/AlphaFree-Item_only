@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Usage: bash start_alpha_baby_steam.sh 0,1,2,3 weights/alpha_baby_steam_v1
+# Usage: bash start_alpha_baby_steam.sh 0,1,2,3 weights/alpha_baby_steam_v2
 # Independent jobs on exactly four GPUs, not single-model distributed training.
 set -euo pipefail
 alpha_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 alpha_gpu_csv="${1:-0,1,2,3}"
-alpha_output="${2:-${alpha_dir}/weights/alpha_baby_steam_v1}"
+alpha_output="${2:-${alpha_dir}/weights/alpha_baby_steam_v2}"
 alpha_python="${ALPHA_PYTHON:-python}"
 if [[ ! "$alpha_gpu_csv" =~ ^[0-9]+(,[0-9]+){3}$ ]]; then
   echo "Specify exactly four distinct GPU IDs, e.g. 0,2,4,5" >&2
